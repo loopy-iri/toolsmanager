@@ -44,6 +44,20 @@ docker compose ps
 
 پورت برنامه عمداً روی loopback منتشر می‌شود و باید پشت reverse proxy دارای HTTPS قرار گیرد. راهنمای کامل در [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) است.
 
+## نماهای پنل مدیریت کاربران
+
+### دسکتاپ
+
+![پنل مدیریت کاربران در دسکتاپ](docs/screenshots/admin-users-desktop.png)
+
+### ایجاد کاربر
+
+![فرم ایجاد کاربر جدید](docs/screenshots/admin-create-user-dialog.png)
+
+### موبایل
+
+<img src="docs/screenshots/admin-users-mobile.png" alt="پنل مدیریت کاربران در موبایل" width="390">
+
 ## داده و مهاجرت
 
 منبع حقیقت production فایل `server/data/toolmanager.sqlite` (یا مقدار `TOOLMANAGER_DATABASE_PATH`) است. در نخستین راه‌اندازی، اگر `server/data.json` نسخه MVP موجود باشد، به‌صورت خودکار به SQLite وارد می‌شود. فایل SQLite، `.env` و داده عملیاتی در Git قرار نمی‌گیرند.
