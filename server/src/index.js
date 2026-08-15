@@ -13,6 +13,7 @@ const databasePath = path.resolve(process.env.TOOLMANAGER_DATABASE_PATH || path.
 const legacyDataPath = path.join(__dirname, '..', 'data.json');
 const sessionHours = positiveInteger(process.env.SESSION_TTL_HOURS, 12);
 const appOrigin = process.env.APP_ORIGIN || `http://localhost:${port}`;
+const allowedOrigins = new Set([appOrigin, ...(isProduction ? [] : ['http://localhost:5173', 'http://127.0.0.1:5173'])]);
 const cookieSecure = process.env.COOKIE_SECURE ? process.env.COOKIE_SECURE === 'true' : isProduction;
 const initialPassword = process.env.TOOLMANAGER_INITIAL_PASSWORD || (isProduction ? '' : 'ToolManager123!');
 
@@ -106,7 +107,7 @@ app.use((req, res, next) => {
 app.use('/api', (req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
 app.use(express.json({limit: '32kb', type: 'application/json'}));
 app.use('/api', (req, res, next) => {
-  if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method) && req.get('origin') && req.get('origin') !== appOrigin) return res.status(403).json({error: 'مبدأ درخواست معتبر نیست'});
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method) && req.get('origin') && !allowedOrigins.has(req.get('origin'))) return res.status(403).json({error: 'مبدأ درخواست معتبر نیست'});
   next();
 });
 

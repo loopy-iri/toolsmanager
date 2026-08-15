@@ -145,6 +145,13 @@ test('past due checkout becomes overdue', async () => {
   assert.equal(state.requests.find(item => item.id === 'late').status, 'overdue');
 });
 
+test('development proxy origin is allowed and foreign origins are rejected', async () => {
+  const allowed = await fetch(base + '/requests', {method: 'POST', headers: {'Content-Type': 'application/json', Cookie: technicianCookie, Origin: 'http://127.0.0.1:5173'}, body: JSON.stringify(request())});
+  assert.equal(allowed.status, 201);
+  const rejected = await fetch(base + '/requests', {method: 'POST', headers: {'Content-Type': 'application/json', Cookie: technicianCookie, Origin: 'https://example.invalid'}, body: JSON.stringify(request())});
+  assert.equal(rejected.status, 403);
+});
+
 test('authenticated users can rotate their password', async () => {
   const result = await post('/auth/password', {currentPassword: 'TestPassword123!', newPassword: 'NewTestPassword456!', confirmation: 'NewTestPassword456!'});
   assert.equal(result.response.status, 204);
