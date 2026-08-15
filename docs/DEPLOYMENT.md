@@ -65,7 +65,7 @@ NODE_ENV=production APP_ORIGIN=https://tools.example.com COOKIE_SECURE=true TOOL
 
 ## ایجاد و مدیریت حساب
 
-در اولین database چهار حساب seed ساخته می‌شود: `ali`، `maryam`، `hossein` و `zahra`. همه رمز اولیه env را می‌گیرند و باید بعد از نخستین ورود رمز را تغییر دهند. نسخه فعلی پنل مدیریت کاربر ندارد؛ افزودن یا غیرفعال‌سازی حساب باید به‌عنوان تغییر کنترل‌شده داده/کد و با backup انجام شود. برای سازمان دارای directory مرکزی، OIDC/SSO مسیر توسعه پیشنهادی است.
+در اولین database چهار حساب seed ساخته می‌شود: `ali`، `maryam`، `hossein` و `zahra`. همه رمز اولیه env را می‌گیرند و باید بعد از نخستین ورود رمز را تغییر دهند. با حساب سرپرست `hossein` وارد شوید، رمز او را فوراً تغییر دهید و سپس حساب‌های واقعی را از پنل «مدیریت کاربران» بسازید. حساب‌های بلااستفاده seed را غیرفعال کنید؛ حداقل یک سرپرست فعال باید باقی بماند. برای سازمان دارای directory مرکزی، OIDC/SSO مسیر توسعه پیشنهادی است.
 
 ## ارتقا
 
@@ -74,4 +74,4 @@ NODE_ENV=production APP_ORIGIN=https://tools.example.com COOKIE_SECURE=true TOOL
 3. `docker compose up -d --build` را اجرا کنید.
 4. `/api/ready` و ورود کاربر را بررسی کنید.
 
-مهاجرت schema در startup انجام می‌شود و داده موجود حفظ می‌شود. در استقرار چند replica، تا زمان جایگزینی لایه state با database server مستقل، فقط یک replica اجرا کنید.
+مهاجرت schema در startup انجام می‌شود و داده موجود حفظ می‌شود. ستون `must_change_password` در ارتقای نسخه‌های قبلی خودکار افزوده می‌شود. در استقرار چند replica، تا زمان جایگزینی لایه state با database server مستقل، فقط یک replica اجرا کنید.

@@ -13,6 +13,7 @@ let server;
 let base;
 let technicianCookie;
 let managerCookie;
+let supervisorCookie;
 
 before(() => new Promise(resolve => {
   server = app.listen(0, '127.0.0.1', () => {
@@ -36,13 +37,14 @@ beforeEach(async () => {
   resetForTests(data);
   technicianCookie = await login('ali');
   managerCookie = await login('maryam');
+  supervisorCookie = await login('hossein');
 });
 
-async function login(username) {
+async function login(username, password = 'TestPassword123!') {
   const response = await fetch(base + '/auth/login', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({username, password: 'TestPassword123!'})
+    body: JSON.stringify({username, password})
   });
   assert.equal(response.status, 200);
   return response.headers.get('set-cookie').split(';')[0];
@@ -56,6 +58,22 @@ async function post(url, body, cookie = technicianCookie) {
   });
   const responseBody = response.status === 204 ? null : await response.json();
   return {response, body: responseBody};
+}
+
+async function patch(url, body, cookie = supervisorCookie) {
+  const response = await fetch(base + url, {
+    method: 'PATCH',
+    headers: {'Content-Type': 'application/json', Cookie: cookie},
+    body: JSON.stringify(body)
+  });
+  return {response, body: await response.json()};
+}
+
+async function createUser(overrides = {}) {
+  return post('/admin/users', {
+    name: 'کاربر آزمایشی', username: 'test.user', team: 'تعمیرات', role: 'technician',
+    active: true, training: ['عمومی'], password: 'TemporaryPass123!', ...overrides
+  }, supervisorCookie);
 }
 
 async function getState(cookie = technicianCookie) {
@@ -156,5 +174,66 @@ test('authenticated users can rotate their password', async () => {
   const result = await post('/auth/password', {currentPassword: 'TestPassword123!', newPassword: 'NewTestPassword456!', confirmation: 'NewTestPassword456!'});
   assert.equal(result.response.status, 204);
   const response = await fetch(base + '/auth/login', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({username: 'ali', password: 'NewTestPassword456!'})});
+  assert.equal(response.status, 200);
+});
+
+test('only supervisors can access user administration', async () => {
+  for (const cookie of [technicianCookie, managerCookie]) {
+    const response = await fetch(base + '/admin/users', {headers: {Cookie: cookie}});
+    assert.equal(response.status, 403);
+  }
+  const response = await fetch(base + '/admin/users', {headers: {Cookie: supervisorCookie}});
+  assert.equal(response.status, 200);
+});
+
+test('supervisors can create users and duplicate usernames are rejected', async () => {
+  const created = await createUser();
+  assert.equal(created.response.status, 201);
+  assert.equal(created.body.username, 'test.user');
+  const duplicate = await createUser({name: 'کاربر دوم'});
+  assert.equal(duplicate.response.status, 409);
+});
+
+test('the current and last active supervisor cannot be downgraded or deactivated', async () => {
+  const state = await getState(supervisorCookie);
+  const supervisor = state.users.find(user => user.id === 'u3');
+  let result = await patch('/admin/users/u3', {...supervisor, role: 'technician'});
+  assert.equal(result.response.status, 409);
+  result = await patch('/admin/users/u3', {...supervisor, active: false});
+  assert.equal(result.response.status, 409);
+});
+
+test('deactivating a user invalidates all of their sessions', async () => {
+  const created = await createUser();
+  const userCookie = await login('test.user', 'TemporaryPass123!');
+  const result = await patch(`/admin/users/${created.body.id}`, {...created.body, active: false});
+  assert.equal(result.response.status, 200);
+  const me = await fetch(base + '/auth/me', {headers: {Cookie: userCookie}});
+  assert.equal(me.status, 401);
+});
+
+test('password reset invalidates sessions and replaces the old password', async () => {
+  const created = await createUser();
+  const userCookie = await login('test.user', 'TemporaryPass123!');
+  const reset = await post(`/admin/users/${created.body.id}/reset-password`, {password: 'ReplacementPass456!'}, supervisorCookie);
+  assert.equal(reset.response.status, 204);
+  const me = await fetch(base + '/auth/me', {headers: {Cookie: userCookie}});
+  assert.equal(me.status, 401);
+  let response = await fetch(base + '/auth/login', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({username: 'test.user', password: 'TemporaryPass123!'})});
+  assert.equal(response.status, 401);
+  response = await fetch(base + '/auth/login', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({username: 'test.user', password: 'ReplacementPass456!'})});
+  assert.equal(response.status, 200);
+});
+
+test('supervisors can clear a locked user account', async () => {
+  const created = await createUser();
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    await fetch(base + '/auth/login', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({username: 'test.user', password: 'wrong-password'})});
+  }
+  let response = await fetch(base + '/auth/login', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({username: 'test.user', password: 'TemporaryPass123!'})});
+  assert.equal(response.status, 401);
+  const unlocked = await post(`/admin/users/${created.body.id}/unlock`, {}, supervisorCookie);
+  assert.equal(unlocked.response.status, 204);
+  response = await fetch(base + '/auth/login', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({username: 'test.user', password: 'TemporaryPass123!'})});
   assert.equal(response.status, 200);
 });

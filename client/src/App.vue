@@ -3,8 +3,8 @@ import {computed, nextTick, onMounted, onUnmounted, ref, watch} from 'vue'
 import {
   Activity, AlertTriangle, ArrowDownToLine, ArrowUpFromLine, Bell, Boxes, CalendarClock,
   Check, CircleCheck, ClipboardCheck, ClipboardList, Clock3, HardHat,
-  History, KeyRound, LayoutDashboard, LockKeyhole, LogOut, Menu, Package, PackageCheck, Plus, RefreshCw, RotateCcw,
-  Search, ShieldCheck, SlidersHorizontal, TriangleAlert, UserRound, Wrench, X
+  History, KeyRound, LayoutDashboard, LockKeyhole, LockOpen, LogOut, Menu, Package, PackageCheck, Pencil, Plus, RefreshCw, RotateCcw,
+  Search, ShieldCheck, SlidersHorizontal, TriangleAlert, UserCheck, UserCog, UserPlus, UserRound, UserX, Wrench, X
 } from 'lucide-vue-next'
 
 const api = '/api'
@@ -24,16 +24,31 @@ const actionPending = ref('')
 const requestDialog = ref(null)
 const returnDialog = ref(null)
 const passwordDialog = ref(null)
+const userDialog = ref(null)
+const resetPasswordDialog = ref(null)
 const requestError = ref('')
 const returnError = ref('')
 const serviceError = ref('')
 const passwordError = ref('')
+const adminError = ref('')
+const userError = ref('')
+const resetPasswordError = ref('')
 const requestTrigger = ref(null)
 const form = ref({toolId: 't1', quantity: 1, purpose: '', neededUntil: '', priority: 'normal', emergencyReason: ''})
 const returnForm = ref({requestId: '', condition: 'سالم', notes: ''})
 const passwordForm = ref({currentPassword: '', newPassword: '', confirmation: ''})
+const adminUsers = ref([])
+const adminLoading = ref(false)
+const adminQuery = ref('')
+const adminFilters = ref({role: 'all', status: 'all'})
+const userForm = ref({id: '', name: '', username: '', team: '', role: 'technician', active: true, training: [], password: '', confirmation: ''})
+const resetPasswordForm = ref({userId: '', userName: '', password: '', confirmation: ''})
 const filters = ref({toolCategory: 'all', toolCondition: 'all', requestStatus: 'all', requestPriority: 'all'})
-const hashHandler = () => { view.value = window.location.hash.replace('#', '') || 'dashboard' }
+const hashHandler = () => {
+  const next = window.location.hash.replace('#', '') || 'dashboard'
+  view.value = next === 'admin' && !isAdmin.value ? 'dashboard' : next
+  if (view.value === 'admin') loadAdmin()
+}
 
 const roleLabel = {technician: 'تکنسین', storekeeper: 'انباردار', supervisor: 'سرپرست'}
 const statusLabel = {queued: 'در صف انتظار', ready: 'آماده تحویل', checked_out: 'تحویل شده', returned: 'بازگشت شده', overdue: 'معوق', damaged: 'آسیب‌دیده', rejected: 'رد شده'}
@@ -43,8 +58,9 @@ const activityLabel = {approve: 'تایید درخواست', checkout: 'تحوی
 
 const userMap = computed(() => Object.fromEntries(state.value.users.map(user => [user.id, user])))
 const toolMap = computed(() => Object.fromEntries(state.value.tools.map(tool => [tool.id, tool])))
-const currentUser = computed(() => userMap.value[sessionUser.value?.id] || sessionUser.value || {})
+const currentUser = computed(() => ({...(sessionUser.value || {}), ...(userMap.value[sessionUser.value?.id] || {})}))
 const canManage = computed(() => ['storekeeper', 'supervisor'].includes(currentUser.value.role))
+const isAdmin = computed(() => currentUser.value.role === 'supervisor')
 const categories = computed(() => [...new Set(state.value.tools.map(tool => tool.category))])
 const filteredTools = computed(() => state.value.tools.filter(tool => {
   const text = `${tool.name} ${tool.code} ${tool.category} ${tool.location}`.toLowerCase()
@@ -72,8 +88,29 @@ const serviceTools = computed(() => state.value.tools.filter(tool => tool.servic
 const availableUnits = computed(() => state.value.tools.reduce((sum, tool) => sum + tool.available, 0))
 const totalUnits = computed(() => state.value.tools.reduce((sum, tool) => sum + tool.total, 0))
 const todayLabel = computed(() => new Intl.DateTimeFormat('fa-IR', {weekday: 'long', month: 'long', day: 'numeric'}).format(new Date()))
+const viewTitle = computed(() => ({dashboard: 'داشبورد عملیاتی', inventory: 'موجودی و وضعیت ابزار', requests: 'صف و تاریخچه درخواست‌ها', admin: 'مدیریت کاربران'}[view.value] || 'داشبورد عملیاتی'))
+const filteredAdminUsers = computed(() => adminUsers.value.filter(user => {
+  const text = `${user.name} ${user.username} ${user.team} ${roleLabel[user.role]}`.toLowerCase()
+  const matchesQuery = !adminQuery.value || text.includes(adminQuery.value.toLowerCase())
+  const matchesRole = adminFilters.value.role === 'all' || user.role === adminFilters.value.role
+  const matchesStatus = adminFilters.value.status === 'all' ||
+    (adminFilters.value.status === 'active' && user.active) ||
+    (adminFilters.value.status === 'inactive' && !user.active) ||
+    (adminFilters.value.status === 'locked' && user.lockedUntil > Date.now())
+  return matchesQuery && matchesRole && matchesStatus
+}))
+const adminStats = computed(() => ({
+  total: adminUsers.value.length,
+  active: adminUsers.value.filter(user => user.active).length,
+  supervisors: adminUsers.value.filter(user => user.active && user.role === 'supervisor').length,
+  attention: adminUsers.value.filter(user => !user.active || user.lockedUntil > Date.now() || user.mustChangePassword).length
+}))
 
-function setView(next) { view.value = next; window.location.hash = next; mobile.value = false; query.value = '' }
+function setView(next) {
+  if (next === 'admin' && !isAdmin.value) return
+  view.value = next; window.location.hash = next; mobile.value = false; query.value = ''
+  if (next === 'admin') loadAdmin()
+}
 function formatDate(value) { return value ? new Date(value).toLocaleString('fa-IR', {dateStyle: 'short', timeStyle: 'short'}) : '—' }
 function relativeDue(request) {
   const diff = new Date(request.neededUntil).getTime() - Date.now()
@@ -104,10 +141,33 @@ function openReturn(request) {
 function closeReturn() { returnDialog.value?.close() }
 function openPassword() { passwordError.value = ''; passwordForm.value = {currentPassword: '', newPassword: '', confirmation: ''}; passwordDialog.value?.showModal(); nextTick(() => passwordDialog.value?.querySelector('input')?.focus()) }
 function closePassword() { passwordDialog.value?.close() }
+function openUser(user = null) {
+  userError.value = ''
+  userForm.value = user ? {...user, training: [...user.training], password: '', confirmation: ''} : {id: '', name: '', username: '', team: '', role: 'technician', active: true, training: [], password: '', confirmation: ''}
+  userDialog.value?.showModal()
+  nextTick(() => userDialog.value?.querySelector('input')?.focus())
+}
+function closeUser() { userDialog.value?.close() }
+function openResetPassword(user) {
+  resetPasswordError.value = ''
+  resetPasswordForm.value = {userId: user.id, userName: user.name, password: '', confirmation: ''}
+  resetPasswordDialog.value?.showModal()
+  nextTick(() => resetPasswordDialog.value?.querySelector('input')?.focus())
+}
+function closeResetPassword() { resetPasswordDialog.value?.close() }
+function generateTemporaryPassword(target) {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%'
+  const bytes = crypto.getRandomValues(new Uint8Array(16))
+  const password = Array.from(bytes, value => alphabet[value % alphabet.length]).join('')
+  target.password = password
+  target.confirmation = password
+}
 function onDialogClose(dialogType) {
   if (dialogType === 'request') { requestError.value = ''; nextTick(() => requestTrigger.value?.focus?.()) }
   if (dialogType === 'return') { returnError.value = '' }
   if (dialogType === 'password') { passwordError.value = '' }
+  if (dialogType === 'user') { userError.value = '' }
+  if (dialogType === 'reset-password') { resetPasswordError.value = '' }
 }
 
 async function load() {
@@ -174,8 +234,68 @@ async function changePassword() {
   try {
     const response = await fetch(`${api}/auth/password`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(passwordForm.value)})
     if (!response.ok) { const result = await response.json(); throw new Error(result.error || 'تغییر رمز انجام نشد') }
+    sessionUser.value = {...sessionUser.value, mustChangePassword: false}
     closePassword(); showToast('رمز عبور با موفقیت تغییر کرد')
   } catch (passwordFailure) { passwordError.value = passwordFailure.message }
+  finally { actionPending.value = '' }
+}
+async function loadAdmin() {
+  if (!isAdmin.value) return
+  adminLoading.value = true
+  adminError.value = ''
+  try {
+    const response = await fetch(`${api}/admin/users`)
+    const result = await response.json()
+    if (!response.ok) throw new Error(result.error || 'فهرست کاربران دریافت نشد')
+    adminUsers.value = result.users
+  } catch (adminFailure) { adminError.value = adminFailure.message }
+  finally { adminLoading.value = false }
+}
+async function submitUser() {
+  userError.value = ''
+  const creating = !userForm.value.id
+  if (creating && userForm.value.password !== userForm.value.confirmation) { userError.value = 'تکرار رمز موقت یکسان نیست.'; return }
+  actionPending.value = 'user'
+  try {
+    const url = creating ? `${api}/admin/users` : `${api}/admin/users/${userForm.value.id}`
+    const response = await fetch(url, {method: creating ? 'POST' : 'PATCH', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(userForm.value)})
+    const result = await response.json()
+    if (!response.ok) throw new Error(result.error || 'اطلاعات کاربر ذخیره نشد')
+    closeUser(); showToast(creating ? 'کاربر جدید ایجاد شد' : 'اطلاعات کاربر به‌روزرسانی شد')
+    await Promise.all([load(), loadAdmin()])
+  } catch (userFailure) { userError.value = userFailure.message }
+  finally { actionPending.value = '' }
+}
+async function setUserActive(user, activeValue) {
+  if (!activeValue && !window.confirm(`حساب ${user.name} غیرفعال و نشست‌های او بسته شود؟`)) return
+  actionPending.value = `active:${user.id}`
+  try {
+    const response = await fetch(`${api}/admin/users/${user.id}`, {method: 'PATCH', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({...user, active: activeValue})})
+    const result = await response.json()
+    if (!response.ok) throw new Error(result.error || 'وضعیت حساب تغییر نکرد')
+    showToast(activeValue ? 'حساب کاربر فعال شد' : 'حساب کاربر غیرفعال شد')
+    await Promise.all([load(), loadAdmin()])
+  } catch (userFailure) { showToast(userFailure.message, 'error') }
+  finally { actionPending.value = '' }
+}
+async function unlockUser(user) {
+  actionPending.value = `unlock:${user.id}`
+  try {
+    const response = await fetch(`${api}/admin/users/${user.id}/unlock`, {method: 'POST'})
+    if (!response.ok) { const result = await response.json(); throw new Error(result.error || 'قفل حساب باز نشد') }
+    showToast('قفل ورود کاربر باز شد'); await loadAdmin()
+  } catch (unlockFailure) { showToast(unlockFailure.message, 'error') }
+  finally { actionPending.value = '' }
+}
+async function submitResetPassword() {
+  resetPasswordError.value = ''
+  if (resetPasswordForm.value.password !== resetPasswordForm.value.confirmation) { resetPasswordError.value = 'تکرار رمز موقت یکسان نیست.'; return }
+  actionPending.value = 'reset-password'
+  try {
+    const response = await fetch(`${api}/admin/users/${resetPasswordForm.value.userId}/reset-password`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({password: resetPasswordForm.value.password})})
+    if (!response.ok) { const result = await response.json(); throw new Error(result.error || 'رمز عبور بازنشانی نشد') }
+    closeResetPassword(); showToast('رمز موقت ثبت و نشست‌های قبلی باطل شد'); await loadAdmin()
+  } catch (resetFailure) { resetPasswordError.value = resetFailure.message }
   finally { actionPending.value = '' }
 }
 function statusClass(value) { return `status-${value}` }
@@ -190,7 +310,14 @@ async function bootstrap() {
   authLoading.value = true
   try {
     const response = await fetch(`${api}/auth/me`)
-    if (response.ok) { sessionUser.value = (await response.json()).user; await load() }
+    if (response.ok) {
+      sessionUser.value = (await response.json()).user
+      await load()
+      if (view.value === 'admin') {
+        if (isAdmin.value) await loadAdmin()
+        else setView('dashboard')
+      }
+    }
   } catch { loginError.value = 'ارتباط با سرور برقرار نشد.' }
   finally { authLoading.value = false }
 }
@@ -253,6 +380,7 @@ onUnmounted(() => window.removeEventListener('hashchange', hashHandler))
         <button :class="{active:view==='dashboard'}" :aria-current="view==='dashboard'?'page':undefined" @click="setView('dashboard')"><LayoutDashboard aria-hidden="true"/>داشبورد<span v-if="overdue.length" class="nav-badge">{{overdue.length}}</span></button>
         <button :class="{active:view==='inventory'}" :aria-current="view==='inventory'?'page':undefined" @click="setView('inventory')"><Boxes aria-hidden="true"/>موجودی ابزار</button>
         <button :class="{active:view==='requests'}" :aria-current="view==='requests'?'page':undefined" @click="setView('requests')"><ClipboardList aria-hidden="true"/>درخواست‌ها<span v-if="ready.length" class="nav-badge muted">{{ready.length}}</span></button>
+        <button v-if="isAdmin" :class="{active:view==='admin'}" :aria-current="view==='admin'?'page':undefined" @click="setView('admin')"><UserCog aria-hidden="true"/>مدیریت کاربران<span v-if="adminStats.attention" class="nav-badge muted">{{adminStats.attention}}</span></button>
       </nav>
       <div class="sidebar-footer"><div><span class="live-dot"></span><span>سرویس آنلاین</span></div><small>همگام‌سازی {{todayLabel}}</small></div>
     </aside>
@@ -260,9 +388,11 @@ onUnmounted(() => window.removeEventListener('hashchange', hashHandler))
     <main id="main-content" class="main-content">
       <header class="topbar">
         <button class="icon-button mobile-menu" aria-label="باز کردن منو" @click="mobile=!mobile"><Menu aria-hidden="true"/></button>
-        <div class="page-heading"><span class="eyebrow">مرکز کنترل عملیات · {{todayLabel}}</span><h1>{{view==='dashboard'?'داشبورد عملیاتی':view==='inventory'?'موجودی و وضعیت ابزار':'صف و تاریخچه درخواست‌ها'}}</h1></div>
-        <div class="topbar-actions"><span class="system-state"><span class="live-dot"></span> API متصل</span><button class="primary-action" aria-label="درخواست جدید" title="درخواست جدید" @click="openRequest"><Plus aria-hidden="true"/>درخواست جدید</button><button class="icon-button" aria-label="خروج از سامانه" title="خروج از سامانه" @click="logout"><LogOut aria-hidden="true"/></button></div>
+        <div class="page-heading"><span class="eyebrow">مرکز کنترل عملیات · {{todayLabel}}</span><h1>{{viewTitle}}</h1></div>
+        <div class="topbar-actions"><span class="system-state"><span class="live-dot"></span> API متصل</span><button v-if="view!=='admin'" class="primary-action" aria-label="درخواست جدید" title="درخواست جدید" @click="openRequest"><Plus aria-hidden="true"/>درخواست جدید</button><button class="icon-button" aria-label="خروج از سامانه" title="خروج از سامانه" @click="logout"><LogOut aria-hidden="true"/></button></div>
       </header>
+
+      <div v-if="currentUser.mustChangePassword" class="password-notice" role="status"><KeyRound aria-hidden="true"/><span><strong>رمز موقت هنوز فعال است.</strong> برای حفظ امنیت حساب، رمز شخصی خود را ثبت کنید.</span><button class="secondary-action" @click="openPassword">تغییر رمز</button></div>
 
       <div v-if="error" class="error-banner" role="alert"><TriangleAlert aria-hidden="true"/><span>{{error}}</span><button class="text-button" @click="load">تلاش دوباره</button></div>
       <div v-if="loading" class="loading-state" aria-live="polite"><div class="loading-line wide"></div><div class="loading-line"></div><div class="loading-line short"></div></div>
@@ -323,7 +453,17 @@ onUnmounted(() => window.removeEventListener('hashchange', hashHandler))
           <div v-if="!filteredTools.length" class="empty-state page-empty"><Search aria-hidden="true"/><strong>نتیجه‌ای پیدا نشد</strong><span>فیلترها یا عبارت جست‌وجو را تغییر دهید.</span></div>
         </section>
 
-        <section v-else class="page-section" aria-labelledby="requests-title">
+        <section v-else-if="view==='admin' && isAdmin" class="page-section" aria-labelledby="admin-title">
+          <div class="page-toolbar"><div><span class="section-kicker">ACCESS CONTROL</span><h2 id="admin-title">کاربران و دسترسی‌ها</h2><p>حساب، نقش، آموزش و وضعیت امنیتی اعضای تیم را مدیریت کنید.</p></div><button class="primary-action" @click="openUser()"><UserPlus aria-hidden="true"/>کاربر جدید</button></div>
+          <div class="admin-summary" aria-label="خلاصه کاربران"><div><span>کل کاربران</span><strong>{{adminStats.total}}</strong></div><div><span>حساب فعال</span><strong>{{adminStats.active}}</strong></div><div><span>سرپرست فعال</span><strong>{{adminStats.supervisors}}</strong></div><div :class="{attention:adminStats.attention}"><span>نیازمند اقدام</span><strong>{{adminStats.attention}}</strong></div></div>
+          <div v-if="adminError" class="inline-error" role="alert">{{adminError}}</div>
+          <div class="filter-bar"><label class="search-field"><Search aria-hidden="true"/><span class="sr-only">جست‌وجوی کاربر</span><input v-model.trim="adminQuery" placeholder="نام، نام کاربری، تیم یا نقش"/></label><label class="filter-field"><span>نقش</span><select v-model="adminFilters.role"><option value="all">همه نقش‌ها</option><option v-for="(label,key) in roleLabel" :key="key" :value="key">{{label}}</option></select></label><label class="filter-field"><span>وضعیت حساب</span><select v-model="adminFilters.status"><option value="all">همه وضعیت‌ها</option><option value="active">فعال</option><option value="inactive">غیرفعال</option><option value="locked">قفل ورود</option></select></label><span class="result-count">{{filteredAdminUsers.length}} کاربر</span></div>
+          <div v-if="adminLoading" class="loading-state" aria-live="polite"><div class="loading-line"></div><div class="loading-line short"></div></div>
+          <div v-else class="data-table-wrap admin-table-wrap"><table class="data-table admin-table"><thead><tr><th>کاربر</th><th>نقش و تیم</th><th>آموزش‌ها</th><th>امنیت</th><th>وضعیت</th><th>اقدام</th></tr></thead><tbody><tr v-for="user in filteredAdminUsers" :key="user.id"><td data-label="کاربر"><div class="table-primary"><span class="tool-symbol small"><UserRound aria-hidden="true"/></span><div><strong>{{user.name}}</strong><small dir="ltr">@{{user.username}}</small></div></div></td><td data-label="نقش و تیم"><strong>{{roleLabel[user.role]}}</strong><small>{{user.team}}</small></td><td data-label="آموزش‌ها"><div class="training-list"><span v-for="item in user.training" :key="item">{{item}}</span><small v-if="!user.training.length">بدون آموزش ثبت‌شده</small></div></td><td data-label="امنیت"><div class="security-state"><span v-if="user.lockedUntil>Date.now()" class="status-chip status-damaged">قفل تا {{formatDate(user.lockedUntil)}}</span><span v-else-if="user.mustChangePassword" class="status-chip status-queued">تغییر رمز لازم</span><span v-else class="status-chip status-healthy">عادی</span><small>{{user.activeSessions}} نشست فعال</small></div></td><td data-label="وضعیت"><span class="status-chip" :class="user.active?'status-healthy':'status-rejected'">{{user.active?'فعال':'غیرفعال'}}</span></td><td data-label="اقدام"><div class="table-actions admin-actions"><button class="icon-button" :aria-label="`ویرایش ${user.name}`" title="ویرایش" @click="openUser(user)"><Pencil aria-hidden="true"/></button><button class="icon-button" :aria-label="`بازنشانی رمز ${user.name}`" title="بازنشانی رمز" :disabled="user.id===currentUser.id" @click="openResetPassword(user)"><KeyRound aria-hidden="true"/></button><button v-if="user.lockedUntil>Date.now()" class="icon-button" :aria-label="`باز کردن قفل ${user.name}`" title="باز کردن قفل" :disabled="actionPending===`unlock:${user.id}`" @click="unlockUser(user)"><LockOpen aria-hidden="true"/></button><button v-if="user.active" class="icon-button danger-icon" :aria-label="`غیرفعال کردن ${user.name}`" title="غیرفعال کردن" :disabled="user.id===currentUser.id || actionPending===`active:${user.id}`" @click="setUserActive(user,false)"><UserX aria-hidden="true"/></button><button v-else class="icon-button" :aria-label="`فعال کردن ${user.name}`" title="فعال کردن" :disabled="actionPending===`active:${user.id}`" @click="setUserActive(user,true)"><UserCheck aria-hidden="true"/></button></div></td></tr></tbody></table></div>
+          <div v-if="!adminLoading && !filteredAdminUsers.length" class="empty-state page-empty"><UserCog aria-hidden="true"/><strong>کاربری پیدا نشد</strong><span>فیلترها یا عبارت جست‌وجو را تغییر دهید.</span></div>
+        </section>
+
+        <section v-else-if="view==='requests'" class="page-section" aria-labelledby="requests-title">
           <div class="page-toolbar"><div><span class="section-kicker">REQUEST CONTROL</span><h2 id="requests-title">صف و تاریخچه درخواست‌ها</h2><p>یک نمای واحد برای تایید، تحویل، بازگشت و پیگیری موعدها.</p></div><button class="primary-action" @click="openRequest"><Plus aria-hidden="true"/>درخواست جدید</button></div>
           <div class="filter-bar"><label class="search-field"><Search aria-hidden="true"/><span class="sr-only">جست‌وجوی درخواست</span><input v-model="query" placeholder="ابزار، درخواست‌کننده یا شرح کار"/></label><label class="filter-field"><span>وضعیت</span><select v-model="filters.requestStatus"><option value="all">همه وضعیت‌ها</option><option v-for="(label,key) in statusLabel" :key="key" :value="key">{{label}}</option></select></label><label class="filter-field"><span>اولویت</span><select v-model="filters.requestPriority"><option value="all">همه اولویت‌ها</option><option value="urgent">اضطراری</option><option value="normal">عادی</option></select></label><span class="result-count">{{filteredRequests.length}} درخواست</span></div>
           <div class="data-table-wrap"><table class="data-table requests-table"><thead><tr><th>درخواست</th><th>درخواست‌کننده</th><th>اولویت</th><th>موعد</th><th>وضعیت</th><th>اقدام</th></tr></thead><tbody><tr v-for="request in filteredRequests" :key="request.id"><td><div class="table-primary"><span class="tool-symbol small"><ClipboardList aria-hidden="true"/></span><div><strong>{{toolMap[request.toolId]?.name}}</strong><small>{{request.purpose}}</small></div></div></td><td>{{userMap[request.requesterId]?.name}}<small>{{request.quantity}} واحد</small></td><td><span class="priority-label" :class="request.priority"><span class="priority-dot"></span>{{request.priority==='urgent'?'اضطراری':'عادی'}}</span></td><td><span :class="{late:request.status==='overdue'}">{{formatDate(request.neededUntil)}}</span><small>{{relativeDue(request)}}</small></td><td><span class="status-chip" :class="statusClass(request.status)">{{statusLabel[request.status]}}</span></td><td><div class="table-actions"><button v-if="request.status==='ready' && canManage" class="action-button primary-soft" @click="runAction(request.id,'checkout')"><ArrowDownToLine aria-hidden="true"/>تحویل</button><button v-if="['checked_out','overdue'].includes(request.status) && canManage" class="action-button secondary-soft" @click="openReturn(request)"><ArrowUpFromLine aria-hidden="true"/>بازگشت</button><button v-if="request.status==='queued' && canManage" class="icon-button" :aria-label="`تایید ${toolMap[request.toolId]?.name}`" @click="runAction(request.id,'approve')"><Check aria-hidden="true"/></button><button v-if="request.status==='queued' && canManage" class="icon-button danger-icon" :aria-label="`رد ${toolMap[request.toolId]?.name}`" @click="runAction(request.id,'reject')"><X aria-hidden="true"/></button></div></td></tr></tbody></table></div>
@@ -337,6 +477,10 @@ onUnmounted(() => window.removeEventListener('hashchange', hashHandler))
     <dialog ref="returnDialog" class="modal-dialog narrow-dialog" aria-labelledby="return-dialog-title" @close="onDialogClose('return')"><form class="modal-form" @submit.prevent="submitReturn"><div class="modal-header"><div><span class="section-kicker">RETURN CHECK</span><h2 id="return-dialog-title">ثبت بازگشت و بازرسی</h2></div><button type="button" class="icon-button" aria-label="بستن پنجره" @click="closeReturn"><X aria-hidden="true"/></button></div><div v-if="returnError" class="form-error" role="alert"><TriangleAlert aria-hidden="true"/><span>{{returnError}}</span></div><p class="return-context">{{toolMap[state.requests.find(request=>request.id===returnForm.requestId)?.toolId]?.name}} · {{userMap[state.requests.find(request=>request.id===returnForm.requestId)?.requesterId]?.name}}</p><fieldset class="condition-field"><legend>وضعیت ابزار پس از بازگشت</legend><label v-for="(label,key) in conditionLabel" :key="key" :class="['condition-option',key==='سالم'?'healthy':'needs-check',{selected:returnForm.condition===key}]"><input v-model="returnForm.condition" type="radio" :value="key"/><span><strong>{{label}}</strong><small>{{key==='سالم'?'قابل تحویل بعدی':'ورود به صف بازرسی'}}</small></span></label></fieldset><label class="form-field"><span>یادداشت بازرسی</span><textarea v-model.trim="returnForm.notes" rows="3" placeholder="ترک بدنه، صدای غیرعادی یا توضیح وضعیت"></textarea></label><div class="modal-actions"><button type="button" class="secondary-action" @click="closeReturn">انصراف</button><button class="primary-action" :disabled="actionPending===`return:${returnForm.requestId}`"><RefreshCw v-if="actionPending===`return:${returnForm.requestId}`" class="spin" aria-hidden="true"/><Check v-else aria-hidden="true"/>ثبت بازگشت</button></div></form></dialog>
 
     <dialog ref="passwordDialog" class="modal-dialog narrow-dialog" aria-labelledby="password-dialog-title" @close="onDialogClose('password')"><form class="modal-form" @submit.prevent="changePassword"><div class="modal-header"><div><span class="section-kicker">ACCOUNT SECURITY</span><h2 id="password-dialog-title">تغییر رمز عبور</h2></div><button type="button" class="icon-button" aria-label="بستن پنجره" @click="closePassword"><X aria-hidden="true"/></button></div><div v-if="passwordError" class="form-error" role="alert"><TriangleAlert aria-hidden="true"/><span>{{passwordError}}</span></div><label class="form-field"><span>رمز عبور فعلی <b>*</b></span><input v-model="passwordForm.currentPassword" type="password" autocomplete="current-password" required/></label><label class="form-field"><span>رمز عبور جدید <b>*</b></span><input v-model="passwordForm.newPassword" type="password" autocomplete="new-password" minlength="12" required/><small class="field-help">حداقل ۱۲ نویسه؛ استفاده از مدیر رمز عبور پیشنهاد می‌شود.</small></label><label class="form-field"><span>تکرار رمز عبور جدید <b>*</b></span><input v-model="passwordForm.confirmation" type="password" autocomplete="new-password" minlength="12" required/></label><div class="modal-actions"><button type="button" class="secondary-action" @click="closePassword">انصراف</button><button class="primary-action" :disabled="actionPending==='password'"><RefreshCw v-if="actionPending==='password'" class="spin" aria-hidden="true"/><KeyRound v-else aria-hidden="true"/>ذخیره رمز جدید</button></div></form></dialog>
+
+    <dialog ref="userDialog" class="modal-dialog" aria-labelledby="user-dialog-title" @close="onDialogClose('user')"><form class="modal-form" @submit.prevent="submitUser"><div class="modal-header"><div><span class="section-kicker">USER ACCESS</span><h2 id="user-dialog-title">{{userForm.id?'ویرایش حساب کاربر':'ایجاد کاربر جدید'}}</h2></div><button type="button" class="icon-button" aria-label="بستن پنجره" @click="closeUser"><X aria-hidden="true"/></button></div><div v-if="userError" class="form-error" role="alert"><TriangleAlert aria-hidden="true"/><span>{{userError}}</span></div><div class="form-grid"><label class="form-field"><span>نام و نام خانوادگی <b>*</b></span><input v-model.trim="userForm.name" maxlength="80" autocomplete="off" required/></label><label class="form-field"><span>نام کاربری <b>*</b></span><input v-model.trim="userForm.username" dir="ltr" minlength="3" maxlength="32" pattern="[a-zA-Z0-9._-]{3,32}" autocomplete="off" required/><small class="field-help">۳ تا ۳۲ نویسه لاتین، عدد، نقطه، خط تیره یا زیرخط</small></label><label class="form-field"><span>تیم <b>*</b></span><input v-model.trim="userForm.team" maxlength="80" required/></label><label class="form-field"><span>نقش <b>*</b></span><select v-model="userForm.role" required><option v-for="(label,key) in roleLabel" :key="key" :value="key">{{label}}</option></select></label></div><fieldset class="training-picker"><legend>آموزش‌های تاییدشده</legend><label v-for="category in [...new Set([...categories,'ایمنی'])]" :key="category"><input v-model="userForm.training" type="checkbox" :value="category"/><span>{{category}}</span></label></fieldset><div v-if="!userForm.id" class="temporary-password"><div class="form-grid"><label class="form-field"><span>رمز موقت <b>*</b></span><input v-model="userForm.password" type="password" autocomplete="new-password" minlength="12" required/></label><label class="form-field"><span>تکرار رمز موقت <b>*</b></span><input v-model="userForm.confirmation" type="password" autocomplete="new-password" minlength="12" required/></label></div><button type="button" class="text-button generate-password" @click="generateTemporaryPassword(userForm)"><KeyRound aria-hidden="true"/>تولید رمز موقت امن</button><small class="field-help">کاربر پس از ورود، نیاز به تغییر این رمز خواهد داشت.</small></div><label class="account-toggle"><input v-model="userForm.active" type="checkbox" :disabled="userForm.id===currentUser.id"/><span><strong>حساب فعال باشد</strong><small>{{userForm.id===currentUser.id?'حساب فعلی را نمی‌توان غیرفعال کرد.':'کاربر امکان ورود و استفاده از سامانه را داشته باشد.'}}</small></span></label><div class="modal-actions"><button type="button" class="secondary-action" @click="closeUser">انصراف</button><button class="primary-action" :disabled="actionPending==='user'"><RefreshCw v-if="actionPending==='user'" class="spin" aria-hidden="true"/><UserCheck v-else aria-hidden="true"/>{{userForm.id?'ذخیره تغییرات':'ایجاد حساب'}}</button></div></form></dialog>
+
+    <dialog ref="resetPasswordDialog" class="modal-dialog narrow-dialog" aria-labelledby="reset-password-dialog-title" @close="onDialogClose('reset-password')"><form class="modal-form" @submit.prevent="submitResetPassword"><div class="modal-header"><div><span class="section-kicker">RESET PASSWORD</span><h2 id="reset-password-dialog-title">بازنشانی رمز عبور</h2></div><button type="button" class="icon-button" aria-label="بستن پنجره" @click="closeResetPassword"><X aria-hidden="true"/></button></div><div v-if="resetPasswordError" class="form-error" role="alert"><TriangleAlert aria-hidden="true"/><span>{{resetPasswordError}}</span></div><p class="return-context">حساب {{resetPasswordForm.userName}}؛ با ثبت رمز جدید تمام نشست‌های فعلی او بسته می‌شود.</p><label class="form-field"><span>رمز موقت جدید <b>*</b></span><input v-model="resetPasswordForm.password" type="password" autocomplete="new-password" minlength="12" required/></label><label class="form-field"><span>تکرار رمز موقت <b>*</b></span><input v-model="resetPasswordForm.confirmation" type="password" autocomplete="new-password" minlength="12" required/></label><button type="button" class="text-button generate-password" @click="generateTemporaryPassword(resetPasswordForm)"><KeyRound aria-hidden="true"/>تولید رمز موقت امن</button><div class="modal-actions"><button type="button" class="secondary-action" @click="closeResetPassword">انصراف</button><button class="primary-action" :disabled="actionPending==='reset-password'"><RefreshCw v-if="actionPending==='reset-password'" class="spin" aria-hidden="true"/><KeyRound v-else aria-hidden="true"/>ثبت رمز و بستن نشست‌ها</button></div></form></dialog>
 
     <div v-if="toast.message" class="toast" :class="toast.tone" role="status" aria-live="polite"><CircleCheck v-if="toast.tone==='success'" aria-hidden="true"/><TriangleAlert v-else aria-hidden="true"/><span>{{toast.message}}</span><button class="toast-close" aria-label="بستن پیام" @click="toast={message:'',tone:'success'}"><X aria-hidden="true"/></button></div>
   </div>

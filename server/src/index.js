@@ -65,7 +65,8 @@ db.exec(`
     username TEXT NOT NULL UNIQUE COLLATE NOCASE,
     password_hash TEXT NOT NULL,
     failed_attempts INTEGER NOT NULL DEFAULT 0,
-    locked_until INTEGER NOT NULL DEFAULT 0
+    locked_until INTEGER NOT NULL DEFAULT 0,
+    must_change_password INTEGER NOT NULL DEFAULT 0
   );
   CREATE TABLE IF NOT EXISTS sessions (
     token_hash TEXT PRIMARY KEY,
@@ -77,12 +78,16 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS sessions_expires_at_idx ON sessions(expires_at);
 `);
 
+if (!db.prepare('PRAGMA table_info(accounts)').all().some(column => column.name === 'must_change_password')) {
+  db.exec('ALTER TABLE accounts ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0');
+}
+
 if (!db.prepare('SELECT 1 FROM app_state WHERE id = 1').get()) {
   const initialState = readLegacyState() || structuredClone(seed);
   const now = new Date().toISOString();
   db.prepare('INSERT INTO app_state(id, payload, updated_at) VALUES(1, ?, ?)').run(JSON.stringify(initialState), now);
   const passwordHash = hashPassword(initialPassword);
-  const insertAccount = db.prepare('INSERT INTO accounts(user_id, username, password_hash) VALUES(?, ?, ?)');
+  const insertAccount = db.prepare('INSERT INTO accounts(user_id, username, password_hash, must_change_password) VALUES(?, ?, ?, 1)');
   for (const user of initialState.users) insertAccount.run(user.id, user.username, passwordHash);
 }
 
@@ -135,11 +140,11 @@ app.post('/api/auth/login', (req, res, next) => {
     db.prepare('DELETE FROM sessions WHERE expires_at <= ?').run(now);
     db.prepare('INSERT INTO sessions(token_hash, user_id, expires_at, created_at) VALUES(?, ?, ?, ?)').run(tokenHash(token), user.id, expiresAt, now);
     res.setHeader('Set-Cookie', sessionCookie(token, sessionHours * 60 * 60));
-    res.json({user: publicUser(user)});
+    res.json({user: publicUser(user, account)});
   } catch (error) { next(error); }
 });
 
-app.get('/api/auth/me', authenticate, (req, res) => res.json({user: publicUser(req.user)}));
+app.get('/api/auth/me', authenticate, (req, res) => res.json({user: publicUser(req.user, req.account)}));
 app.post('/api/auth/logout', authenticate, (req, res) => {
   db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(req.sessionHash);
   res.setHeader('Set-Cookie', sessionCookie('', 0));
@@ -152,9 +157,88 @@ app.post('/api/auth/password', authenticate, (req, res, next) => {
     if (newPassword.length < 12) throw httpError(400, 'رمز عبور جدید باید حداقل ۱۲ نویسه داشته باشد');
     const account = db.prepare('SELECT password_hash FROM accounts WHERE user_id = ?').get(req.user.id);
     if (!account || !verifyPassword(currentPassword, account.password_hash)) throw httpError(400, 'رمز عبور فعلی نادرست است');
-    db.prepare('UPDATE accounts SET password_hash = ?, failed_attempts = 0, locked_until = 0 WHERE user_id = ?').run(hashPassword(newPassword), req.user.id);
+    db.prepare('UPDATE accounts SET password_hash = ?, failed_attempts = 0, locked_until = 0, must_change_password = 0 WHERE user_id = ?').run(hashPassword(newPassword), req.user.id);
     db.prepare('DELETE FROM sessions WHERE user_id = ? AND token_hash <> ?').run(req.user.id, req.sessionHash);
     updateState(data => { audit(data, req.user.id, 'change_password', req.user.id, 'تغییر رمز عبور'); return null; });
+    res.status(204).end();
+  } catch (error) { next(error); }
+});
+
+app.get('/api/admin/users', authenticate, requireAdmin, (req, res) => {
+  const users = currentState().users;
+  const accounts = db.prepare(`
+    SELECT a.user_id, a.failed_attempts, a.locked_until, a.must_change_password,
+      (SELECT COUNT(*) FROM sessions s WHERE s.user_id = a.user_id AND s.expires_at > ?) AS active_sessions
+    FROM accounts a
+  `).all(Date.now());
+  const accountMap = Object.fromEntries(accounts.map(account => [account.user_id, account]));
+  res.json({users: users.map(user => adminUser(user, accountMap[user.id]))});
+});
+
+app.post('/api/admin/users', authenticate, requireAdmin, (req, res, next) => {
+  try {
+    const result = updateState(data => {
+      const user = validatedUser(req.body, data);
+      const password = String(req.body?.password || '');
+      if (password.length < 12) throw httpError(400, 'رمز موقت باید حداقل ۱۲ نویسه داشته باشد');
+      if (db.prepare('SELECT 1 FROM accounts WHERE username = ?').get(user.username)) throw httpError(409, 'این نام کاربری قبلاً استفاده شده است');
+      user.id = crypto.randomUUID();
+      data.users.push(user);
+      db.prepare('INSERT INTO accounts(user_id, username, password_hash, must_change_password) VALUES(?, ?, ?, 1)').run(user.id, user.username, hashPassword(password));
+      audit(data, req.user.id, 'create_user', user.id, user.name);
+      return user;
+    });
+    res.status(201).json(result);
+  } catch (error) { next(error); }
+});
+
+app.patch('/api/admin/users/:id', authenticate, requireAdmin, (req, res, next) => {
+  try {
+    const result = updateState(data => {
+      const target = data.users.find(user => user.id === req.params.id);
+      if (!target) throw httpError(404, 'کاربر یافت نشد');
+      const updated = validatedUser(req.body, data, target);
+      if (target.id === req.user.id && (!updated.active || updated.role !== 'supervisor')) throw httpError(409, 'نمی‌توانید دسترسی سرپرستی حساب فعلی را حذف کنید');
+      const activeSupervisors = data.users.filter(user => user.active && user.role === 'supervisor');
+      if (target.active && target.role === 'supervisor' && (!updated.active || updated.role !== 'supervisor') && activeSupervisors.length === 1) throw httpError(409, 'حداقل یک سرپرست فعال باید باقی بماند');
+      const existingUsername = db.prepare('SELECT user_id FROM accounts WHERE username = ?').get(updated.username);
+      if (existingUsername && existingUsername.user_id !== target.id) throw httpError(409, 'این نام کاربری قبلاً استفاده شده است');
+      Object.assign(target, updated);
+      db.prepare('UPDATE accounts SET username = ? WHERE user_id = ?').run(target.username, target.id);
+      if (!target.active) db.prepare('DELETE FROM sessions WHERE user_id = ?').run(target.id);
+      audit(data, req.user.id, 'update_user', target.id, target.name);
+      return target;
+    });
+    res.json(result);
+  } catch (error) { next(error); }
+});
+
+app.post('/api/admin/users/:id/reset-password', authenticate, requireAdmin, (req, res, next) => {
+  try {
+    const password = String(req.body?.password || '');
+    if (password.length < 12) throw httpError(400, 'رمز موقت باید حداقل ۱۲ نویسه داشته باشد');
+    if (req.params.id === req.user.id) throw httpError(409, 'برای حساب فعلی از گزینه تغییر رمز عبور استفاده کنید');
+    updateState(data => {
+      const target = data.users.find(user => user.id === req.params.id);
+      if (!target) throw httpError(404, 'کاربر یافت نشد');
+      db.prepare('UPDATE accounts SET password_hash = ?, failed_attempts = 0, locked_until = 0, must_change_password = 1 WHERE user_id = ?').run(hashPassword(password), target.id);
+      db.prepare('DELETE FROM sessions WHERE user_id = ?').run(target.id);
+      audit(data, req.user.id, 'reset_password', target.id, target.name);
+      return null;
+    });
+    res.status(204).end();
+  } catch (error) { next(error); }
+});
+
+app.post('/api/admin/users/:id/unlock', authenticate, requireAdmin, (req, res, next) => {
+  try {
+    updateState(data => {
+      const target = data.users.find(user => user.id === req.params.id);
+      if (!target) throw httpError(404, 'کاربر یافت نشد');
+      db.prepare('UPDATE accounts SET failed_attempts = 0, locked_until = 0 WHERE user_id = ?').run(target.id);
+      audit(data, req.user.id, 'unlock_user', target.id, target.name);
+      return null;
+    });
     res.status(204).end();
   } catch (error) { next(error); }
 });
@@ -281,7 +365,11 @@ function authenticate(req, res, next) {
   const token = parseCookies(req.headers.cookie).tm_session;
   if (!token) return res.status(401).json({error: 'ورود به سامانه الزامی است'});
   const hash = tokenHash(token);
-  const session = db.prepare('SELECT user_id, expires_at FROM sessions WHERE token_hash = ?').get(hash);
+  const session = db.prepare(`
+    SELECT s.user_id, s.expires_at, a.must_change_password
+    FROM sessions s JOIN accounts a ON a.user_id = s.user_id
+    WHERE s.token_hash = ?
+  `).get(hash);
   if (!session || session.expires_at <= Date.now()) {
     if (session) db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(hash);
     return res.status(401).json({error: 'نشست منقضی شده است'});
@@ -289,12 +377,18 @@ function authenticate(req, res, next) {
   const user = currentState().users.find(item => item.id === session.user_id && item.active);
   if (!user) return res.status(401).json({error: 'حساب کاربری معتبر نیست'});
   req.user = user;
+  req.account = session;
   req.sessionHash = hash;
   next();
 }
 
 function requireManager(req, res, next) {
   if (!['storekeeper', 'supervisor'].includes(req.user.role)) return res.status(403).json({error: 'این اقدام فقط برای انباردار یا سرپرست مجاز است'});
+  next();
+}
+
+function requireAdmin(req, res, next) {
+  if (req.user.role !== 'supervisor') return res.status(403).json({error: 'مدیریت کاربران فقط برای سرپرست مجاز است'});
   next();
 }
 
@@ -319,7 +413,31 @@ function verifyPassword(password, encoded) { const [algorithm, saltValue, hashVa
 function registerLoginFailure(ipKey, account) { const current = loginAttempts.get(ipKey) || {count: 0, blockedUntil: 0}; current.count += 1; if (current.count >= 10) current.blockedUntil = Date.now() + 15 * 60 * 1000; loginAttempts.set(ipKey, current); if (!account) return; const attempts = account.failed_attempts + 1; const lockedUntil = attempts >= 5 ? Date.now() + 15 * 60 * 1000 : 0; db.prepare('UPDATE accounts SET failed_attempts = ?, locked_until = ? WHERE user_id = ?').run(attempts >= 5 ? 0 : attempts, lockedUntil, account.user_id); }
 function sessionCookie(value, maxAge) { return [`tm_session=${value}`, 'Path=/', 'HttpOnly', 'SameSite=Strict', `Max-Age=${maxAge}`, cookieSecure ? 'Secure' : ''].filter(Boolean).join('; '); }
 function tokenHash(token) { return crypto.createHash('sha256').update(token).digest('hex'); }
-function publicUser(user) { const {training, ...safe} = user; return {...safe, training}; }
+function publicUser(user, account = {}) { return {...user, mustChangePassword: Boolean(account.must_change_password)}; }
+function adminUser(user, account = {}) {
+  return {
+    ...user,
+    failedAttempts: Number(account.failed_attempts || 0),
+    lockedUntil: Number(account.locked_until || 0),
+    activeSessions: Number(account.active_sessions || 0),
+    mustChangePassword: Boolean(account.must_change_password)
+  };
+}
+function validatedUser(input, data, existing = {}) {
+  const name = String(input?.name ?? existing.name ?? '').trim();
+  const username = String(input?.username ?? existing.username ?? '').trim().toLowerCase();
+  const team = String(input?.team ?? existing.team ?? '').trim();
+  const role = String(input?.role ?? existing.role ?? 'technician');
+  const active = input?.active === undefined ? (existing.active ?? true) : input.active === true;
+  const training = input?.training === undefined ? (existing.training || []) : Array.isArray(input.training) ? [...new Set(input.training.map(item => String(item).trim()).filter(Boolean))] : null;
+  if (!name || name.length > 80 || !team || team.length > 80) throw httpError(400, 'نام و تیم کاربر الزامی و حداکثر ۸۰ نویسه است');
+  if (!/^[a-z0-9._-]{3,32}$/.test(username)) throw httpError(400, 'نام کاربری باید ۳ تا ۳۲ نویسه لاتین، عدد، نقطه، خط تیره یا زیرخط باشد');
+  if (!['technician', 'storekeeper', 'supervisor'].includes(role)) throw httpError(400, 'نقش کاربر معتبر نیست');
+  if (!training) throw httpError(400, 'فهرست آموزش‌ها معتبر نیست');
+  const allowedTraining = new Set([...data.tools.map(tool => tool.category), 'ایمنی']);
+  if (training.some(item => !allowedTraining.has(item))) throw httpError(400, 'یکی از آموزش‌های انتخاب‌شده معتبر نیست');
+  return {username, name, role, team, active, training};
+}
 function parseCookies(header = '') { return Object.fromEntries(header.split(';').map(item => item.trim().split('=').map(decodeURIComponent)).filter(parts => parts.length === 2)); }
 function positiveInteger(value, fallback) { const parsed = Number(value); return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback; }
 function validFutureDate(value) { const timestamp = new Date(value).getTime(); return Number.isFinite(timestamp) && timestamp > Date.now(); }
@@ -337,8 +455,14 @@ function readLegacyState() {
 
 export function resetForTests(data = seed) {
   if (process.env.NODE_ENV !== 'test') throw new Error('resetForTests is test-only');
-  db.prepare('UPDATE app_state SET payload = ?, updated_at = ? WHERE id = 1').run(JSON.stringify(data), new Date().toISOString());
-  db.exec('DELETE FROM sessions; UPDATE accounts SET failed_attempts = 0, locked_until = 0;');
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    db.prepare('UPDATE app_state SET payload = ?, updated_at = ? WHERE id = 1').run(JSON.stringify(data), new Date().toISOString());
+    db.exec('DELETE FROM sessions; DELETE FROM accounts;');
+    const insertAccount = db.prepare('INSERT INTO accounts(user_id, username, password_hash, must_change_password) VALUES(?, ?, ?, 1)');
+    for (const user of data.users) insertAccount.run(user.id, user.username, hashPassword(initialPassword));
+    db.exec('COMMIT');
+  } catch (error) { db.exec('ROLLBACK'); throw error; }
 }
 export function closeDatabase() { db.close(); }
 export {app};
