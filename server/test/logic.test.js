@@ -166,6 +166,8 @@ test('past due checkout becomes overdue', async () => {
 test('development proxy origin is allowed and foreign origins are rejected', async () => {
   const allowed = await fetch(base + '/requests', {method: 'POST', headers: {'Content-Type': 'application/json', Cookie: technicianCookie, Origin: 'http://127.0.0.1:5173'}, body: JSON.stringify(request())});
   assert.equal(allowed.status, 201);
+  const localProductionBundle = await fetch(base + '/requests', {method: 'POST', headers: {'Content-Type': 'application/json', Cookie: technicianCookie, Origin: 'http://127.0.0.1:3000'}, body: JSON.stringify(request())});
+  assert.equal(localProductionBundle.status, 201);
   const rejected = await fetch(base + '/requests', {method: 'POST', headers: {'Content-Type': 'application/json', Cookie: technicianCookie, Origin: 'https://example.invalid'}, body: JSON.stringify(request())});
   assert.equal(rejected.status, 403);
 });

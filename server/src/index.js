@@ -13,7 +13,7 @@ const databasePath = path.resolve(process.env.TOOLMANAGER_DATABASE_PATH || path.
 const legacyDataPath = path.join(__dirname, '..', 'data.json');
 const sessionHours = positiveInteger(process.env.SESSION_TTL_HOURS, 12);
 const appOrigin = process.env.APP_ORIGIN || `http://localhost:${port}`;
-const allowedOrigins = new Set([appOrigin, ...(isProduction ? [] : ['http://localhost:5173', 'http://127.0.0.1:5173'])]);
+const allowedOrigins = new Set([appOrigin, ...(isProduction ? [] : [`http://localhost:${port}`, `http://127.0.0.1:${port}`, 'http://localhost:5173', 'http://127.0.0.1:5173'])]);
 const cookieSecure = process.env.COOKIE_SECURE ? process.env.COOKIE_SECURE === 'true' : isProduction;
 const initialPassword = process.env.TOOLMANAGER_INITIAL_PASSWORD || (isProduction ? '' : 'ToolManager123!');
 
